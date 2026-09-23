@@ -20,7 +20,7 @@ ARGS:
     <QUERY>                 Natural language description of what you are searching for
 
 OPTIONS:
-    -e, --ecosystem <NAME>  Target ecosystem: 'all' (default), 'github', 'crates', or 'web'
+    -e, --ecosystem <NAME>  Target ecosystem: 'all' (default), {}
     -n, --limit <NUM>       Maximum results to show (default: 5)
     -j, --json              Output machine-readable JSON to stdout
         --no-filter         Show all candidates, skip weak-match filtering
@@ -32,8 +32,14 @@ EXAMPLES:
     jev-scout "fast sqlite tui in rust"
     jev-scout "headless browser without chromium" --ecosystem rust
     jev-scout "token efficient grep for coding agents" --json
+    jev-scout "git porcelain" --ecosystem emacs
+    jev-scout "sqlite tui" --ecosystem nix      # JEV_NIX_CHANNEL=26.05 to pin a release
 "#,
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        search::ecosystem_names()
+            .map(|e| format!("'{}'", e))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     println!("{}", help);
 }
@@ -120,6 +126,15 @@ fn main() {
         }
     };
 
+    if !search::is_valid_ecosystem(&ecosystem) {
+        eprintln!(
+            "Error: unknown ecosystem '{}'. Use all, {}.",
+            ecosystem,
+            search::ecosystem_names().collect::<Vec<_>>().join(", ")
+        );
+        process::exit(2);
+    }
+
     let start_time = Instant::now();
 
     if !json_mode {
@@ -193,17 +208,9 @@ fn main() {
         );
         println!(
             "    {} | \x1b[35m{}\x1b[0m | Updated: {}",
-            if item.candidate.ecosystem == "crates.io" {
-                format!("⬇ {}", format_num(item.candidate.downloads))
-            } else {
-                format!("⭐ {}", format_num(item.candidate.stars))
-            },
+            popularity_label(&item.candidate),
             item.candidate.license,
-            item.candidate
-                .updated_at
-                .chars()
-                .take(10)
-                .collect::<String>()
+            item.candidate.updated_at.get(..10).unwrap_or("n/a")
         );
         if !item.candidate.topics.is_empty() {
             println!(
@@ -238,5 +245,15 @@ fn format_num(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// Registry-appropriate popularity signal for the card header.
+fn popularity_label(c: &types::Candidate) -> String {
+    match c.ecosystem.as_str() {
+        "crates.io" | "melpa" => format!("⬇ {}", format_num(c.downloads)),
+        "nixpkgs" => "nixpkgs".to_string(),
+        "web" => "web".to_string(),
+        _ => format!("⭐ {}", format_num(c.stars)),
     }
 }

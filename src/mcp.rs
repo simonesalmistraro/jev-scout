@@ -1,5 +1,5 @@
 use crate::jev::evaluate_candidates;
-use crate::search::search_candidates;
+use crate::search::{ecosystem_names, is_valid_ecosystem, search_candidates};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -74,7 +74,7 @@ pub fn run_mcp_server(api_key: &str) -> io::Result<()> {
                             {
                                 "name": "scout_repos",
                                 "title": "Scout open-source repos and crates",
-                                "description": "Search and score open-source repositories and crates matching natural-language prompts using TypeSafe Jev System One model. Zero hallucinations, grounded in real GitHub and crates.io metadata. Returns ranked candidates with fit score, confidence, maintenance probability, stars/downloads, and install commands.",
+                                "description": "Search and score open-source repositories and crates matching natural-language prompts using TypeSafe Jev System One model. Zero hallucinations, grounded in real GitHub, crates.io, MELPA (Emacs) and nixpkgs metadata. Returns ranked candidates with fit score, confidence, maintenance probability, stars/downloads, and install commands.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -84,7 +84,7 @@ pub fn run_mcp_server(api_key: &str) -> io::Result<()> {
                                         },
                                         "ecosystem": {
                                             "type": "string",
-                                            "enum": ["all", "github", "crates", "web"],
+                                            "enum": std::iter::once("all").chain(ecosystem_names()).collect::<Vec<_>>(),
                                             "description": "Filter by target ecosystem. Defaults to 'all'."
                                         },
                                         "limit": {
@@ -148,14 +148,14 @@ pub fn run_mcp_server(api_key: &str) -> io::Result<()> {
                 }
 
                 let ecosystem = match args.get("ecosystem").and_then(|e| e.as_str()).unwrap_or("all") {
-                    e @ ("all" | "github" | "crates" | "web") => e,
+                    e if is_valid_ecosystem(e) => e,
                     other => {
                         respond(
                             &mut stdout,
                             &json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
-                                "error": { "code": -32602, "message": format!("Invalid ecosystem '{}'. Use all, github, crates, or web.", other) }
+                                "error": { "code": -32602, "message": format!("Invalid ecosystem '{}'. Use all, {}.", other, ecosystem_names().collect::<Vec<_>>().join(", ")) }
                             }),
                         )?;
                         continue;

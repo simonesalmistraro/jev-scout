@@ -10,6 +10,21 @@ pub const STALE_PENALTY: f64 = 0.9;
 
 /// Composite fit dimensions and code-owned weights. Sums to 1.0.
 /// Maturity rides the deterministic stale penalty, not a question.
+/// MELPA local ranking (no upstream search API). Points per query word by where it hits:
+/// a whole name segment (`git` in `git-gutter`), inside the name, an exact keyword,
+/// or a description word. Each matched word adds a coverage bonus so multi-word
+/// matches beat one strong hit.
+pub const MELPA_NAME_SEGMENT: u32 = 6;
+pub const MELPA_NAME_SUBSTRING: u32 = 4;
+pub const MELPA_KEYWORD: u32 = 3;
+pub const MELPA_DESCRIPTION: u32 = 1;
+pub const MELPA_COVERAGE_BONUS: u32 = 5;
+/// Words nearly every MELPA package matches; they carry no signal.
+pub const MELPA_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "the", "for", "in", "of", "on", "to", "with", "that", "is", "my", "way",
+    "emacs", "elisp", "el", "mode", "package", "plugin", "tool",
+];
+
 pub const FIT_WEIGHTS: &[(&str, f64)] = &[
     ("fit", 0.7),
     ("doc", 0.3),
