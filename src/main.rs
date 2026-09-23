@@ -96,12 +96,10 @@ fn main() {
         }
     }
 
-    let api_key = match std::env::var("TYPESAFE_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
-        _ => {
-            eprintln!("Error: TYPESAFE_API_KEY environment variable is not set.");
-            eprintln!("Please get an API key from https://typesafe.ai and export it:");
-            eprintln!("  export TYPESAFE_API_KEY=\"your_key\"");
+    let api_key = match jev::resolve_api_key() {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("Error: {}", e);
             process::exit(1);
         }
     };

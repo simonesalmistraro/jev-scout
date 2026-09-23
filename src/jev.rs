@@ -4,6 +4,51 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+// Live Jev is served through OpenRouter's alpha Decisions API; the request and
+// response schema are identical to the direct TypeSafe endpoint (same
+// state/questions body, same {"answers": {...}} envelope). Point JEV_API_URL /
+// JEV_MODEL at a direct/self-hosted endpoint to bypass OpenRouter.
+const DEFAULT_JEV_URL: &str = "https://openrouter.ai/api/alpha/decisions";
+const DEFAULT_JEV_MODEL: &str = "~typesafe/jev-latest";
+/// Shared key file, same location the jev-decision skill reads (chmod 600).
+const KEY_FILE: &str = ".config/openrouter/key";
+
+fn jev_url() -> String {
+    std::env::var("JEV_API_URL").unwrap_or_else(|_| DEFAULT_JEV_URL.to_string())
+}
+
+fn jev_model() -> String {
+    std::env::var("JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.to_string())
+}
+
+/// Resolve the Jev API key. Precedence: an explicit env var
+/// (TYPESAFE_API_KEY or OPENROUTER_API_KEY) first, then the shared key file
+/// ~/.config/openrouter/key. Mirrors the token-discovery idiom in search.rs.
+pub fn resolve_api_key() -> Result<String, String> {
+    for var in ["TYPESAFE_API_KEY", "OPENROUTER_API_KEY"] {
+        if let Ok(k) = std::env::var(var) {
+            let k = k.trim();
+            if !k.is_empty() {
+                return Ok(k.to_string());
+            }
+        }
+    }
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let path = std::path::Path::new(&home).join(KEY_FILE);
+    let key = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "no Jev API key: set TYPESAFE_API_KEY or OPENROUTER_API_KEY, or create {} ({})",
+            path.display(),
+            e
+        )
+    })?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err(format!("empty Jev API key in {}", path.display()));
+    }
+    Ok(key)
+}
+
 // ponytail: Jev scores are deterministic per (query, candidate set); cache 60s
 // so repeated/MCP calls skip the ~1.1s API floor entirely.
 const EVAL_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -124,7 +169,7 @@ fn evaluate_via_api(
     );
 
     let payload = json!({
-        "model": "jev-1.13.0",
+        "model": jev_model(),
         "state": {
             "query": query,
             "candidate_count": candidates.len(),
@@ -146,7 +191,7 @@ fn evaluate_via_api(
         "questions": questions
     });
 
-    let response = match ureq::post("https://api.typesafe.ai/v1/systemone")
+    let response = match ureq::post(&jev_url())
         .set("Authorization", &format!("Bearer {}", api_key))
         .set("Content-Type", "application/json")
         .timeout(Duration::from_secs(8))
