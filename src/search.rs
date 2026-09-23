@@ -142,6 +142,7 @@ pub fn search_github(query: &str, limit: usize) -> Result<Vec<Candidate>, String
                         topics,
                         ecosystem: "github".to_string(),
                         install_cmd: format!("gh repo clone {}", full_name),
+                        maintainers: None,
                     });
                 }
             }
@@ -210,6 +211,7 @@ pub fn search_crates_io(query: &str, limit: usize) -> Result<Vec<Candidate>, Str
                         topics: Vec::new(),
                         ecosystem: "crates.io".to_string(),
                         install_cmd: format!("cargo add {}", name),
+                        maintainers: None,
                     });
                 }
             }
@@ -289,6 +291,7 @@ fn parse_ddg_block(block: &str) -> Option<Candidate> {
         topics: Vec::new(),
         ecosystem: "web".to_string(),
         install_cmd: url,
+        maintainers: None,
     })
 }
 
@@ -511,6 +514,7 @@ fn melpa_candidate(name: &str, entry: &MelpaEntry, downloads: u64) -> Candidate 
         topics: props.and_then(|p| p.keywords.clone()).unwrap_or_default(),
         ecosystem: "melpa".to_string(),
         install_cmd: format!("M-x package-install RET {}", name),
+        maintainers: None,
     }
 }
 
@@ -606,6 +610,36 @@ fn first_str(v: &serde_json::Value) -> Option<&str> {
     v.as_array()?.first()?.as_str()
 }
 
+/// `3.1.0-unstable-2026-05-11` -> `2026-05-11T00:00:00Z`. Semver versions carry no date.
+fn nix_version_date(version: &str) -> Option<String> {
+    let (_, rest) = version.split_once("unstable-")?;
+    let date = rest.get(..10)?;
+    let bytes = date.as_bytes();
+    let shaped = bytes.iter().enumerate().all(|(i, b)| match i {
+        4 | 7 => *b == b'-',
+        _ => b.is_ascii_digit(),
+    });
+    let month: u32 = date.get(5..7)?.parse().ok()?;
+    let day: u32 = date.get(8..10)?.parse().ok()?;
+    (shaped && (1..=12).contains(&month) && (1..=31).contains(&day)).then(|| format!("{}T00:00:00Z", date))
+}
+
+/// People plus teams, top-level packages only. Members of generated sets
+/// (rPackages, haskellPackages, python3xxPackages...) list no maintainers because the
+/// set's team owns them in bulk, so their count is unknown (None), not orphaned.
+fn nix_maintainer_count(src: &serde_json::Value) -> Option<u32> {
+    if src["package_attr_set"].as_str() != Some("No package set") {
+        return None;
+    }
+    let people = src["package_maintainers_set"].as_array();
+    let teams = src["package_teams_set"].as_array();
+    if people.is_none() && teams.is_none() {
+        return None;
+    }
+    let count = people.map_or(0, Vec::len) + teams.map_or(0, Vec::len);
+    Some(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
 fn nix_candidate(src: &serde_json::Value) -> Option<Candidate> {
     let attr = src["package_attr_name"].as_str().filter(|a| !a.is_empty())?;
     let version = src["package_pversion"].as_str().unwrap_or("");
@@ -624,15 +658,16 @@ fn nix_candidate(src: &serde_json::Value) -> Option<Candidate> {
         url: first_str(&src["package_homepage"])
             .map(str::to_string)
             .unwrap_or_else(|| format!("https://search.nixos.org/packages?query={}", encode_query(attr))),
-        stars: 0,
+        stars: src["package_repology_repos"].as_u64().unwrap_or(0),
         downloads: 0,
         license: if licenses.is_empty() { "Unknown".to_string() } else { licenses.join(", ") },
-        updated_at: String::new(),
+        updated_at: nix_version_date(version).unwrap_or_default(),
         pushed_at: String::new(),
         language: String::new(),
         topics: if version.is_empty() { Vec::new() } else { vec![version.to_string()] },
         ecosystem: "nixpkgs".to_string(),
         install_cmd: format!("nix shell nixpkgs#{}", attr),
+        maintainers: nix_maintainer_count(src),
     })
 }
 
@@ -653,7 +688,8 @@ pub fn search_nixpkgs(query: &str, limit: usize) -> Result<Vec<Candidate>, Strin
     let body = serde_json::json!({
         "size": limit.max(4),
         "_source": ["package_attr_name", "package_pversion", "package_description",
-                    "package_homepage", "package_license_set"],
+                    "package_homepage", "package_license_set", "package_maintainers_set",
+                    "package_teams_set", "package_repology_repos", "package_attr_set"],
         "query": { "bool": {
             "filter": [{ "term": { "type": "package" } }],
             "must": [{ "multi_match": {
@@ -855,7 +891,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(r#"{"hits":{"hits":[
             {"_source":{"package_attr_name":"sqlit-tui","package_pversion":"1.4.0",
                         "package_description":"TUI for SQL","package_homepage":["https://github.com/Maxteabag/sqlit"],
-                        "package_license_set":["MIT License","Apache License 2.0"]}},
+                        "package_license_set":["MIT License","Apache License 2.0"],
+                        "package_maintainers_set":["a","b"],"package_teams_set":["t"],"package_repology_repos":17,
+                        "package_attr_set":"No package set"}},
             {"_source":{"package_attr_name":"nohome","package_homepage":[],"package_license_set":[]}},
             {"_source":{"package_attr_name":""}}
         ]}}"#).unwrap();
@@ -866,6 +904,24 @@ mod tests {
         assert_eq!(hits[0].topics, ["1.4.0"]);
         assert_eq!(hits[1].url, "https://search.nixos.org/packages?query=nohome");
         assert_eq!(hits[1].license, "Unknown");
+        assert_eq!(hits[0].maintainers, Some(3), "people + teams");
+        assert_eq!(hits[0].stars, 17, "repology distro count");
+        assert_eq!(hits[1].maintainers, None, "absent fields are unknown, not orphaned");
+    }
+
+    #[test]
+    fn nix_orphan_and_version_date() {
+        let orphan = serde_json::json!({"package_attr_set": "No package set",
+                                        "package_maintainers_set": [], "package_teams_set": []});
+        assert_eq!(nix_maintainer_count(&orphan), Some(0));
+        let set_member = serde_json::json!({"package_attr_set": "haskellPackages",
+                                            "package_maintainers_set": [], "package_teams_set": []});
+        assert_eq!(nix_maintainer_count(&set_member), None, "set members are team-owned, not orphaned");
+        assert_eq!(nix_version_date("3.1.0-unstable-2026-05-11").as_deref(), Some("2026-05-11T00:00:00Z"));
+        assert_eq!(nix_version_date("0-unstable-2024-01-02"), Some("2024-01-02T00:00:00Z".into()));
+        assert_eq!(nix_version_date("15.2.0"), None);
+        assert_eq!(nix_version_date("1.0-unstable-2026-13-01"), None);
+        assert_eq!(nix_version_date("1.0-unstable-latest"), None);
         assert!(parse_nix_hits(&serde_json::json!({}), 5).is_err());
     }
 

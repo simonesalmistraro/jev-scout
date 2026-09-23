@@ -252,7 +252,11 @@ fn format_num(n: u64) -> String {
 fn popularity_label(c: &types::Candidate) -> String {
     match c.ecosystem.as_str() {
         "crates.io" | "melpa" => format!("⬇ {}", format_num(c.downloads)),
-        "nixpkgs" => "nixpkgs".to_string(),
+        "nixpkgs" => match c.maintainers {
+            Some(0) => format!("📦 {} distros | orphaned", c.stars),
+            Some(n) => format!("📦 {} distros | {} maintainers", c.stars, n),
+            None => format!("📦 {} distros", c.stars),
+        },
         "web" => "web".to_string(),
         _ => format!("⭐ {}", format_num(c.stars)),
     }

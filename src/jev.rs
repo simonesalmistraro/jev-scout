@@ -175,18 +175,7 @@ fn evaluate_via_api(
             "candidate_count": candidates.len(),
             // Trim derivable fields (install_cmd, url, ecosystem) to cut tokens
             // and reduce context rot: Jev only needs what it judges on.
-            "candidates": candidates.iter().map(|c| json!({
-                "id": c.id,
-                "name": c.name,
-                "description": c.description,
-                "stars": c.stars,
-                "downloads": c.downloads,
-                "license": c.license,
-                "updated_at": c.updated_at,
-                "pushed_at": c.pushed_at,
-                "language": c.language,
-                "topics": c.topics
-            })).collect::<Vec<_>>()
+            "candidates": candidates.iter().map(candidate_state).collect::<Vec<_>>()
         },
         "questions": questions
     });
@@ -257,14 +246,8 @@ fn evaluate_via_api(
         };
 
         let is_best = c.id == best_match_id;
-        // Recency decay: stale (no push/update in 180 days) loses rank weight.
-        // Date math belongs in host code, never in Jev (typesafe rule #2).
-        let stale = is_stale_180d(if c.pushed_at.is_empty() {
-            &c.updated_at
-        } else {
-            &c.pushed_at
-        });
-        let weighted_rank = fit_score * confidence * if stale { crate::policy::STALE_PENALTY } else { 1.0 };
+        // Date and maintainer math belongs in host code, never in Jev (typesafe rule #2).
+        let weighted_rank = fit_score * confidence * rank_penalty(c);
 
         evaluated.push(EvaluatedCandidate {
             candidate: c.clone(),
@@ -287,6 +270,48 @@ fn evaluate_via_api(
 }
 
 /// Drop weak matches below policy floors so low-quality picks never reach the user.
+/// What Jev sees per candidate. Derivable fields (install_cmd, url) are trimmed;
+/// registry-specific facts are added only when the registry supplies them.
+fn candidate_state(c: &crate::types::Candidate) -> serde_json::Value {
+    let mut state = json!({
+        "id": c.id,
+        "name": c.name,
+        "description": c.description,
+        "stars": c.stars,
+        "downloads": c.downloads,
+        "license": c.license,
+        "updated_at": c.updated_at,
+        "pushed_at": c.pushed_at,
+        "language": c.language,
+        "topics": c.topics
+    });
+    if c.ecosystem == "nixpkgs" {
+        state["stars_meaning"] = json!("number of Linux distributions that package it");
+    }
+    if let Some(n) = c.maintainers {
+        state["maintainers"] = json!(n);
+    }
+    state
+}
+
+/// Host-computed rank multiplier: stale (no push/update in STALE_DAYS) and orphaned
+/// (registry says zero maintainers) each cost weight. Never delegated to Jev.
+fn rank_penalty(c: &crate::types::Candidate) -> f64 {
+    let stale = is_stale_180d(if c.pushed_at.is_empty() {
+        &c.updated_at
+    } else {
+        &c.pushed_at
+    });
+    let mut penalty = 1.0;
+    if stale {
+        penalty *= crate::policy::STALE_PENALTY;
+    }
+    if c.maintainers == Some(0) {
+        penalty *= crate::policy::ORPHAN_PENALTY;
+    }
+    penalty
+}
+
 pub fn filter_weak(mut evaluated: Vec<EvaluatedCandidate>) -> Vec<EvaluatedCandidate> {
     evaluated.retain(|e| e.fit_score >= crate::policy::MIN_FIT && e.confidence >= crate::policy::MIN_CONFIDENCE);
     evaluated
@@ -335,6 +360,35 @@ mod tests {
     }
 
     #[test]
+    fn rank_penalty_compounds_stale_and_orphan() {
+        let mk = |updated: &str, maintainers: Option<u32>| crate::types::Candidate {
+            id: "x".into(),
+            name: "x".into(),
+            description: "".into(),
+            url: "".into(),
+            stars: 0,
+            downloads: 0,
+            license: "".into(),
+            updated_at: updated.into(),
+            pushed_at: "".into(),
+            language: "".into(),
+            topics: vec![],
+            ecosystem: "nixpkgs".into(),
+            install_cmd: "".into(),
+            maintainers,
+        };
+        let (stale, orphan) = (crate::policy::STALE_PENALTY, crate::policy::ORPHAN_PENALTY);
+        assert_eq!(rank_penalty(&mk("", None)), 1.0, "unknown is neutral");
+        assert_eq!(rank_penalty(&mk("", Some(2))), 1.0);
+        assert_eq!(rank_penalty(&mk("", Some(0))), orphan);
+        assert_eq!(rank_penalty(&mk("2020-01-01", Some(0))), stale * orphan);
+        let state = candidate_state(&mk("", Some(0)));
+        assert_eq!(state["maintainers"], 0);
+        assert!(state["stars_meaning"].is_string());
+        assert!(candidate_state(&mk("", None)).get("maintainers").is_none());
+    }
+
+    #[test]
     fn weak_filter_thresholds() {
         let mk = |fit: f64, conf: f64| EvaluatedCandidate {
             candidate: crate::types::Candidate {
@@ -351,6 +405,7 @@ mod tests {
                 topics: vec![],
                 ecosystem: "".into(),
                 install_cmd: "".into(),
+                maintainers: None,
             },
             fit_score: fit,
             is_modern: 1.0,

@@ -6,6 +6,8 @@ pub struct Candidate {
     pub name: String,
     pub description: String,
     pub url: String,
+    /// Popularity count: GitHub stars, or for nixpkgs the number of distro repos
+    /// (repology) that also package it.
     pub stars: u64,
     pub downloads: u64,
     pub license: String,
@@ -15,6 +17,10 @@ pub struct Candidate {
     pub topics: Vec<String>,
     pub ecosystem: String,
     pub install_cmd: String,
+    /// Registry-declared maintainers (people + teams). None when the registry
+    /// does not say; Some(0) means orphaned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintainers: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

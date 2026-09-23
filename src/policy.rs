@@ -7,6 +7,8 @@ pub const MIN_CONFIDENCE: f64 = 0.5;
 /// Stale penalty: candidates untouched this long lose 10% rank weight.
 pub const STALE_DAYS: i64 = 180;
 pub const STALE_PENALTY: f64 = 0.9;
+/// Orphan penalty: registry reports zero maintainers (nixpkgs). Compounds with stale.
+pub const ORPHAN_PENALTY: f64 = 0.8;
 
 /// Composite fit dimensions and code-owned weights. Sums to 1.0.
 /// Maturity rides the deterministic stale penalty, not a question.
