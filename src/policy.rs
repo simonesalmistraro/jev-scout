@@ -19,6 +19,8 @@ pub const MELPA_NAME_SUBSTRING: u32 = 4;
 pub const MELPA_KEYWORD: u32 = 3;
 pub const MELPA_DESCRIPTION: u32 = 1;
 pub const MELPA_COVERAGE_BONUS: u32 = 5;
+/// MELPA snapshot rebuilds run every few hours; the on-disk archive copy is reused this long.
+pub const MELPA_DISK_TTL_SECS: u64 = 6 * 60 * 60;
 /// Words nearly every MELPA package matches; they carry no signal.
 pub const MELPA_STOPWORDS: &[&str] = &[
     "a", "an", "and", "the", "for", "in", "of", "on", "to", "with", "that", "is", "my", "way",

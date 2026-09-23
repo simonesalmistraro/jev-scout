@@ -2,6 +2,8 @@ use crate::policy;
 use crate::types::Candidate;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Read;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -333,17 +335,82 @@ struct MelpaIndex {
 }
 
 // ponytail: MELPA has no search endpoint, so the whole 2.7MB archive.json is the
-// index. Held in memory for CACHE_TTL; a cold CLI run always pays the download.
+// index. Two tiers: parsed in memory for CACHE_TTL (MCP repeats), raw on disk under
+// ~/.jev-scout/cache for MELPA_DISK_TTL_SECS (cold CLI runs skip the download).
 static MELPA_CACHE: Mutex<Option<(Instant, Arc<MelpaIndex>)>> = Mutex::new(None);
 
-fn fetch_json<T: serde::de::DeserializeOwned>(source: &str, url: &str) -> Result<T, String> {
+/// Upper bound on a downloaded registry dump; archive.json is ~2.7MB today.
+const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+
+fn fetch_body(source: &str, url: &str) -> Result<String, String> {
+    let mut body = String::new();
     ureq::get(url)
         .set("User-Agent", "jev-scout/0.1.0")
         .timeout(Duration::from_secs(8))
         .call()
         .map_err(|e| upstream_error(source, e))?
-        .into_json()
-        .map_err(|e| format!("{} returned bad JSON: {}", source, e))
+        .into_reader()
+        .take(MAX_BODY_BYTES)
+        .read_to_string(&mut body)
+        .map_err(|e| format!("{} returned bad body: {}", source, e))?;
+    Ok(body)
+}
+
+fn is_fresh(path: &Path, ttl: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < ttl)
+}
+
+/// Read `dir/name` when younger than `ttl`, else `fetch` and persist it (tmp + rename,
+/// so a crash never leaves a torn file). A failed fetch falls back to a stale copy with
+/// a warning: old registry data is still real data, never invented.
+fn disk_cached(
+    dir: Option<&Path>,
+    name: &str,
+    ttl: Duration,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let Some(dir) = dir else { return fetch() };
+    let path = dir.join(name);
+    if is_fresh(&path, ttl) {
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            return Ok(body);
+        }
+    }
+    match fetch() {
+        Ok(body) => {
+            let tmp = dir.join(format!("{}.tmp", name));
+            let saved = std::fs::create_dir_all(dir)
+                .and_then(|_| std::fs::write(&tmp, &body))
+                .and_then(|_| std::fs::rename(&tmp, &path));
+            if let Err(e) = saved {
+                eprintln!("Warning: could not cache {}: {}", path.display(), e);
+            }
+            Ok(body)
+        }
+        Err(e) => match std::fs::read_to_string(&path) {
+            Ok(stale) => {
+                eprintln!("Warning: {}; using stale {}", e, path.display());
+                Ok(stale)
+            }
+            Err(_) => Err(e),
+        },
+    }
+}
+
+/// Registry dump via the ~/.jev-scout disk cache, parsed.
+fn fetch_json_cached<T: serde::de::DeserializeOwned>(
+    source: &str,
+    url: &str,
+    file: &str,
+) -> Result<T, String> {
+    let dir = crate::trend::state_dir().map(|d| d.join("cache"));
+    let ttl = Duration::from_secs(policy::MELPA_DISK_TTL_SECS);
+    let body = disk_cached(dir.as_deref(), file, ttl, || fetch_body(source, url))?;
+    serde_json::from_str(&body).map_err(|e| format!("{} returned bad JSON: {}", source, e))
 }
 
 fn melpa_index() -> Result<Arc<MelpaIndex>, String> {
@@ -355,9 +422,17 @@ fn melpa_index() -> Result<Arc<MelpaIndex>, String> {
         }
     }
     let counts = std::thread::spawn(|| {
-        fetch_json::<HashMap<String, u64>>("MELPA downloads", "https://melpa.org/download_counts.json")
+        fetch_json_cached::<HashMap<String, u64>>(
+            "MELPA downloads",
+            "https://melpa.org/download_counts.json",
+            "melpa-download-counts.json",
+        )
     });
-    let packages = fetch_json::<HashMap<String, MelpaEntry>>("MELPA", "https://melpa.org/archive.json")?;
+    let packages = fetch_json_cached::<HashMap<String, MelpaEntry>>(
+        "MELPA",
+        "https://melpa.org/archive.json",
+        "melpa-archive.json",
+    )?;
     // Download counts only rank ties and fill the display column: warn, don't fail.
     let downloads = counts
         .join()
@@ -792,5 +867,35 @@ mod tests {
         assert_eq!(hits[1].url, "https://search.nixos.org/packages?query=nohome");
         assert_eq!(hits[1].license, "Unknown");
         assert!(parse_nix_hits(&serde_json::json!({}), 5).is_err());
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-scratch").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn disk_cache_reuses_fresh_and_refetches_stale() {
+        let dir = scratch_dir("disk-fresh");
+        let hour = Duration::from_secs(3600);
+        let first = disk_cached(Some(&dir), "a.json", hour, || Ok("v1".into()));
+        assert_eq!(first.unwrap(), "v1");
+        let fresh = disk_cached(Some(&dir), "a.json", hour, || panic!("fresh copy must not refetch"));
+        assert_eq!(fresh.unwrap(), "v1");
+        let stale = disk_cached(Some(&dir), "a.json", Duration::ZERO, || Ok("v2".into()));
+        assert_eq!(stale.unwrap(), "v2");
+        assert!(!dir.join("a.json.tmp").exists(), "tmp file renamed away");
+    }
+
+    #[test]
+    fn disk_cache_falls_back_to_stale_then_fails_loud() {
+        let dir = scratch_dir("disk-fallback");
+        disk_cached(Some(&dir), "b.json", Duration::ZERO, || Ok("old".into())).unwrap();
+        let fallback = disk_cached(Some(&dir), "b.json", Duration::ZERO, || Err("down".into()));
+        assert_eq!(fallback.unwrap(), "old");
+        let missing = disk_cached(Some(&dir), "none.json", Duration::ZERO, || Err("down".into()));
+        assert_eq!(missing.unwrap_err(), "down");
+        assert_eq!(disk_cached(None, "x", Duration::ZERO, || Ok("direct".into())).unwrap(), "direct");
     }
 }

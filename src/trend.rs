@@ -3,12 +3,15 @@
 
 use std::collections::HashMap;
 
+/// Per-user state directory, `~/.jev-scout`. Shared with the registry disk cache.
+pub fn state_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".jev-scout"))
+}
+
 fn history_path() -> Option<std::path::PathBuf> {
-    std::env::var("HOME").ok().map(|h| {
-        let mut p = std::path::PathBuf::from(h);
-        p.push(".jev-scout/history.json");
-        p
-    })
+    state_dir().map(|d| d.join("history.json"))
 }
 
 fn load() -> HashMap<String, String> {
