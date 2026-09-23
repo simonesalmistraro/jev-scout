@@ -22,11 +22,12 @@ Requires `TYPESAFE_API_KEY` (get from https://typesafe.ai). GitHub search uses `
 TYPESAFE_API_KEY=... cargo run -- "fast sqlite tui in rust" --ecosystem rust --json
 TYPESAFE_API_KEY=... cargo run -- --mcp        # stdio JSON-RPC 2.0 MCP server
 ```
-Ecosystems: `all` (default), `github`, `crates`, `web`. `--limit` clamps to 1..10.
+Ecosystems: `all` (default), `github`, `crates`, `web`, `emacs` (MELPA), `nix` (nixpkgs). Aliases and dispatch live in the `SOURCES` table in `search.rs`; add a row there to add an ecosystem. `--limit` clamps to 1..10.
+`JEV_NIX_CHANNEL` picks the nixpkgs channel (default `unstable`, e.g. `26.05`).
 
 ## Pipeline (the big picture)
 `main.rs` orchestrates three deterministic stages; the LLM only judges, never computes:
-1. **Ground** — `search::search_candidates` fans out across GitHub REST + crates.io (+ web) in parallel threads, returns up to 8 real `Candidate`s.
+1. **Ground** — `search::search_candidates` fans out one thread per `SOURCES` row (GitHub, crates.io, web, MELPA, nixpkgs), `div_ceil(8, 5).max(2)` = 2 each.
 2. **Score** — `jev::evaluate_candidates` sends candidates to `POST https://api.typesafe.ai/v1/systemone`. Per candidate it asks a `score` (fit), a `score` (docs), and a `noul` (actively maintained); plus one `choice` (single best_match) across all. **Candidates are chunked by 3 and fanned out per chunk** — Jev silently drops questions past ~15/call, so one big request would lose answers.
 3. **Rank + filter** — host code composites and sorts by `weighted_rank`; `filter_weak` drops candidates under policy floors unless `--no-filter`.
 
@@ -34,7 +35,7 @@ Ecosystems: `all` (default), `github`, `crates`, `web`. `--limit` clamps to 1..1
 | File | Role |
 |------|------|
 | `main.rs` | `lexopt` arg parsing, orchestration, ANSI terminal cards, `--json` |
-| `search.rs` | Candidate retrieval (GitHub/crates.io/web), token discovery, 60s TTL cache |
+| `search.rs` | Candidate retrieval (GitHub/crates.io/web/MELPA/nixpkgs), `SOURCES` table, token discovery, 60s TTL caches |
 | `jev.rs` | Jev request build, chunked fan-out, answer parsing, ranking, `filter_weak`, stale math, 60s eval cache |
 | `policy.rs` | **Single source of truth for every threshold/weight.** Tune here, nowhere else |
 | `trend.rs` | Remembers top pick per query in `~/.jev-scout/history.json` (std-only), reports movement |
@@ -46,6 +47,8 @@ Ecosystems: `all` (default), `github`, `crates`, `web`. `--limit` clamps to 1..1
 - **LLM judges, host computes**: all date/staleness/ranking math lives in host code. `is_stale_180d` uses Julian-day arithmetic (no `chrono`) *on purpose* — dates must never go to Jev.
 - **Composite fit** = `fit*0.7 + doc*0.3` on a **0–3 scale** (see `FIT_WEIGHTS`); modern% is the `noul` value; best_match is the `choice`. The old "1–4 fit / single fan-out" description is stale — trust the code.
 - **Fail loud, never default**: a malformed/missing Jev answer skips that candidate with a `Warning:` to stderr — it never silently substitutes a default score. `confidence` is the `min` across a candidate's dimensions.
+- **MELPA has no search API**: the 2.7MB `archive.json` is fetched and matched locally (`melpa_match_score`), held in memory for 60s, so a cold CLI run pays the download. `ver[0]` (YYYYMMDD) feeds the stale math.
+- **nixpkgs** uses the search.nixos.org Elasticsearch backend (public creds from its frontend). The `latest-N-nixos-<channel>` alias rotates, so it is discovered via `_cat/aliases` (highest N), never hardcoded. No dates, so no stale penalty.
 - **Two in-process caches** (`search.rs`, `jev.rs`), both 60s TTL, whole-map sweep (no LRU). They make warm MCP-session repeats ~0.3s. Keyed on normalized query + sorted candidate ids.
 - **Strict budget**: `ureq` blocking (no async runtime), `lexopt` (no clap), no new deps without cause, 8s per-upstream timeout, single static binary, $0 paid APIs.
 - **Model is pinned** to a version string in `jev.rs` (currently `jev-1.13.0`), not `jev-latest`.

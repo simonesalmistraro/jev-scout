@@ -32,7 +32,7 @@ Keywords: typesafe-ai, jev, github-search, crates-io, rust, cli, mcp-server, cod
 When developers and AI coding agents ask LLMs for open-source libraries, general-purpose models routinely hallucinate non-existent package names or recommend abandoned six-year-old repositories. GitHub's native search relies on rigid keyword matching that fails on conceptual queries.
 
 `jev-scout` solves this by decoupling discovery from decision:
-- **Grounding first:** Queries real package registries (GitHub REST API, crates.io) to fetch actual live metadata.
+- **Grounding first:** Queries real package registries (GitHub REST API, crates.io, MELPA, nixpkgs) to fetch actual live metadata.
 - **System One scoring:** Uses TypeSafe AI's `jev-latest` in a single speculative fan-out call (~1s API floor) to score architectural fit, license suitability, and maintenance freshness.
 - **Zero hallucinated packages:** You only get verified, installable repositories with exact stars, licenses, and clone commands.
 - **Dual surface:** Works as an interactive terminal CLI for developers and as a stdio MCP server for autonomous coding agents (Claude Code, Antigravity).
@@ -73,6 +73,8 @@ jev-scout "fast sqlite tui in rust"
 
 # Filter by ecosystem
 jev-scout "headless browser without chromium" --ecosystem rust
+jev-scout "git porcelain" --ecosystem emacs
+jev-scout "sqlite tui" --ecosystem nix   # JEV_NIX_CHANNEL=26.05 pins a release
 
 # Output raw JSON for scripts and agents
 jev-scout "token efficient grep for coding agents" --json
@@ -93,7 +95,7 @@ claude mcp add jev-scout -- bash -c "export TYPESAFE_API_KEY=$TYPESAFE_API_KEY &
 # add an mcpServers entry: {"command": "jev-scout", "args": ["--mcp"], "env": {"TYPESAFE_API_KEY": "..."}}
 ```
 
-The `scout_repos` tool takes `query` (required), plus optional `ecosystem` (`all`/`github`/`crates`), `limit` (1-10), and `strict` (filter weak matches, default true). Results include `structuredContent` for typed consumption.
+The `scout_repos` tool takes `query` (required), plus optional `ecosystem` (`all`/`github`/`crates`/`web`/`emacs`/`nix`), `limit` (1-10), and `strict` (filter weak matches, default true). Results include `structuredContent` for typed consumption.
 
 ---
 
@@ -102,7 +104,7 @@ The `scout_repos` tool takes `query` (required), plus optional `ecosystem` (`all
 ```text
 User Query: "fast sqlite tui in rust"
    │
-   ├─► 1. Grounded Search (GitHub REST API + crates.io)
+   ├─► 1. Grounded Search (GitHub REST API + crates.io + web + MELPA + nixpkgs)
    │      Pulls top candidate repos with stars, licenses, and commit dates.
    │
    ├─► 2. Speculative Fan-out Call (POST https://api.typesafe.ai/v1/systemone)
@@ -122,7 +124,7 @@ User Query: "fast sqlite tui in rust"
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--ecosystem` | `-e` | `all` | Target ecosystem (`all`, `github`, `crates`) |
+| `--ecosystem` | `-e` | `all` | Target ecosystem (`all`, `github`, `crates`, `web`, `emacs`, `nix`) |
 | `--limit` | `-n` | `5` | Maximum number of ranked results to return |
 | `--json` | `-j` | `false` | Output machine-readable JSON to stdout |
 | `--no-filter` | | `false` | Show all candidates, skip weak-match filtering |
@@ -145,7 +147,7 @@ jev-scout/
 ├── src/
 │   ├── main.rs         # Lexopt argument parsing and terminal display
 │   ├── jev.rs          # TypeSafe API client (Choice, Score, Noul)
-│   ├── search.rs       # Candidate retriever (GitHub REST + crates.io)
+│   ├── search.rs       # Candidate retriever (GitHub REST, crates.io, web, MELPA, nixpkgs)
 │   └── mcp.rs          # Stdio JSON-RPC 2.0 MCP server handler
 └── tests/
     └── mock_test.rs    # Offline unit tests using recorded fixtures
