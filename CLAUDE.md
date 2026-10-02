@@ -27,9 +27,9 @@ Ecosystems: `all` (default), `github`, `crates`, `web`, `emacs` (MELPA), `nix` (
 
 ## Pipeline (the big picture)
 `main.rs` orchestrates three deterministic stages; the LLM only judges, never computes:
-1. **Ground** — `search::search_candidates` fans out one thread per `SOURCES` row (GitHub, crates.io, web, MELPA, nixpkgs), `div_ceil(8, 5).max(2)` = 2 each.
+1. **Ground** — `search::search_candidates` fans out one thread per `SOURCES` row (GitHub, crates.io, web, MELPA, nixpkgs), `div_ceil(8, 5).max(2)` = 2 each. `dedupe_candidates` then folds same-homepage duplicates (registry copy kept, GitHub stars/pushed_at/license absorbed).
 2. **Score** — `jev::evaluate_candidates` sends candidates to `POST https://api.typesafe.ai/v1/systemone`. Per candidate it asks a `score` (fit), a `score` (docs), and a `noul` (actively maintained); plus one `choice` (single best_match) across all. **Candidates are chunked by 3 and fanned out per chunk** — Jev silently drops questions past ~15/call, so one big request would lose answers.
-3. **Rank + filter** — host code composites and sorts by `weighted_rank`; `filter_weak` drops candidates under policy floors unless `--no-filter`.
+3. **Rank + filter** — host code composites and sorts by `weighted_rank` globally across chunks (`finalize_ranking`); each chunk's Jev `choice` yields a best_match, only the highest-ranked one keeps the flag; `filter_weak` drops candidates under policy floors unless `--no-filter`.
 
 ## Module map
 | File | Role |

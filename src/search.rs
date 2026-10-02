@@ -761,17 +761,79 @@ pub fn search_candidates(query: &str, ecosystem: &str, total_limit: usize) -> Ve
         return hit;
     }
 
-    let results = match find_source(ecosystem) {
+    let results = dedupe_candidates(match find_source(ecosystem) {
         Some(search) => run_logged(search, query, total_limit),
         None if ecosystem.eq_ignore_ascii_case("all") => fan_out_all(query, total_limit),
         None => {
             eprintln!("Warning: unknown ecosystem '{}'", ecosystem);
             Vec::new()
         }
-    };
+    });
 
     cache_put(&key, &results);
     results
+}
+
+/// Homepage URL reduced to host + path, so `https://www.github.com/a/b.git/` and
+/// `http://github.com/a/b` collide. None for non-http URLs.
+fn url_identity(url: &str) -> Option<String> {
+    let lower = url.trim().to_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest).trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+/// Which copy of a duplicate to keep. Package registries win: they carry the
+/// install command. Code hosts next, bare web results last.
+fn source_preference(ecosystem: &str) -> u8 {
+    match ecosystem {
+        "web" => 0,
+        "github" => 1,
+        _ => 2,
+    }
+}
+
+/// Fold signals from a duplicate into the kept copy without overwriting real data.
+/// nixpkgs `stars` means distro count, so it never takes GitHub stars.
+fn absorb_duplicate(keep: &mut Candidate, other: Candidate) {
+    if keep.stars == 0 && keep.ecosystem != "nixpkgs" {
+        keep.stars = other.stars;
+    }
+    if keep.pushed_at.is_empty() {
+        keep.pushed_at = other.pushed_at;
+    }
+    if matches!(keep.license.as_str(), "Unknown" | "None" | "Web")
+        && !matches!(other.license.as_str(), "Unknown" | "None" | "Web")
+    {
+        keep.license = other.license;
+    }
+}
+
+/// One candidate per homepage across sources, first-seen order, preferred copy kept.
+fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::with_capacity(candidates.len());
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for c in candidates {
+        let Some(identity) = url_identity(&c.url) else {
+            out.push(c);
+            continue;
+        };
+        match seen.get(&identity) {
+            None => {
+                seen.insert(identity, out.len());
+                out.push(c);
+            }
+            Some(&i) if source_preference(&c.ecosystem) > source_preference(&out[i].ecosystem) => {
+                let replaced = std::mem::replace(&mut out[i], c);
+                absorb_duplicate(&mut out[i], replaced);
+            }
+            Some(&i) => absorb_duplicate(&mut out[i], c),
+        }
+    }
+    out
 }
 
 /// Query every source in parallel; results joined in table order.
@@ -953,5 +1015,54 @@ mod tests {
         let missing = disk_cached(Some(&dir), "none.json", Duration::ZERO, || Err("down".into()));
         assert_eq!(missing.unwrap_err(), "down");
         assert_eq!(disk_cached(None, "x", Duration::ZERO, || Ok("direct".into())).unwrap(), "direct");
+    }
+
+    fn cand(id: &str, ecosystem: &str, url: &str, stars: u64, pushed: &str, license: &str) -> Candidate {
+        Candidate {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            url: url.into(),
+            stars,
+            downloads: 0,
+            license: license.into(),
+            updated_at: String::new(),
+            pushed_at: pushed.into(),
+            language: String::new(),
+            topics: Vec::new(),
+            ecosystem: ecosystem.into(),
+            install_cmd: String::new(),
+            maintainers: None,
+        }
+    }
+
+    #[test]
+    fn normalizes_url_identity() {
+        let a = url_identity("https://www.GitHub.com/magit/magit.git/");
+        assert_eq!(a.as_deref(), Some("github.com/magit/magit"));
+        assert_eq!(url_identity("http://github.com/magit/magit"), a);
+        assert_eq!(url_identity("M-x package-install"), None);
+        assert_eq!(url_identity("https://"), None);
+    }
+
+    #[test]
+    fn dedupe_keeps_registry_copy_and_absorbs_github_signals() {
+        let input = vec![
+            cand("magit/magit", "github", "https://github.com/magit/magit", 7000, "2026-09-30T00:00:00Z", "GPL-3.0"),
+            cand("other", "github", "https://github.com/x/other", 5, "", "MIT"),
+            cand("melpa:magit", "melpa", "https://github.com/magit/magit/", 0, "", "Unknown"),
+            cand("nix:tool", "nixpkgs", "https://github.com/x/tool", 4, "", "MIT"),
+            cand("x/tool", "github", "https://github.com/x/tool", 900, "2026-01-01T00:00:00Z", "MIT"),
+            cand("web:noise", "web", "https://github.com/x/other", 0, "", "Web"),
+        ];
+        let out = dedupe_candidates(input);
+        let ids: Vec<&str> = out.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["melpa:magit", "other", "nix:tool"], "first-seen slot, preferred copy");
+        assert_eq!(out[0].stars, 7000);
+        assert_eq!(out[0].pushed_at, "2026-09-30T00:00:00Z");
+        assert_eq!(out[0].license, "GPL-3.0");
+        assert_eq!(out[2].stars, 4, "nixpkgs distro count is never replaced by GitHub stars");
+        assert_eq!(out[2].pushed_at, "2026-01-01T00:00:00Z");
+        assert_eq!(out[1].license, "MIT", "web duplicate never downgrades the kept copy");
     }
 }
