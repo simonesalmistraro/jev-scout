@@ -254,6 +254,7 @@ fn popularity_label(c: &types::Candidate) -> String {
         "crates.io" | "melpa" => format!("⬇ {}", format_num(c.downloads)),
         "nixpkgs" => match c.maintainers {
             Some(0) => format!("📦 {} distros | orphaned", c.stars),
+            Some(1) => format!("📦 {} distros | 1 maintainer", c.stars),
             Some(n) => format!("📦 {} distros | {} maintainers", c.stars, n),
             None => format!("📦 {} distros", c.stars),
         },
