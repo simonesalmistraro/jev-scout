@@ -713,20 +713,43 @@ pub fn search_nixpkgs(query: &str, limit: usize) -> Result<Vec<Candidate>, Strin
 
 type SearchFn = fn(&str, usize) -> Result<Vec<Candidate>, String>;
 
-/// Every registry jev-scout can ground on: (canonical name, accepted aliases, fetcher).
+/// One registry jev-scout can ground on.
+struct Source {
+    name: &'static str,
+    blurb: &'static str,
+    aliases: &'static [&'static str],
+    search: SearchFn,
+}
+
 /// Adding an ecosystem is one row here; dispatch, `all` fan-out, CLI help and the
 /// MCP enum all derive from this table.
-const SOURCES: &[(&str, &[&str], SearchFn)] = &[
-    ("github", &["github"], search_github),
-    ("crates", &["crates", "crates.io", "rust"], search_crates_io),
-    ("web", &["web"], search_duckduckgo),
-    ("emacs", &["emacs", "melpa", "elisp"], search_melpa),
-    ("nix", &["nix", "nixos", "nixpkgs"], search_nixpkgs),
+const SOURCES: &[Source] = &[
+    Source { name: "github", blurb: "GitHub repositories", aliases: &["github"], search: search_github },
+    Source { name: "crates", blurb: "crates.io Rust crates", aliases: &["crates", "crates.io", "rust"], search: search_crates_io },
+    Source { name: "web", blurb: "DuckDuckGo web results", aliases: &["web"], search: search_duckduckgo },
+    Source { name: "emacs", blurb: "MELPA Emacs packages", aliases: &["emacs", "melpa", "elisp"], search: search_melpa },
+    Source { name: "nix", blurb: "nixpkgs packages", aliases: &["nix", "nixos", "nixpkgs"], search: search_nixpkgs },
 ];
 
 /// Canonical ecosystem names, in fan-out order (excludes `all`).
 pub fn ecosystem_names() -> impl Iterator<Item = &'static str> {
-    SOURCES.iter().map(|(name, _, _)| *name)
+    SOURCES.iter().map(|s| s.name)
+}
+
+/// Help-text block: one line per ecosystem with its accepted aliases.
+pub fn ecosystem_help() -> String {
+    let mut lines = vec![format!("{:28}{:10}every source below, about 2 results each", "", "all")];
+    for source in SOURCES {
+        let extra: Vec<&str> = source.aliases.iter().copied().filter(|a| *a != source.name).collect();
+        let alias_note = if extra.is_empty() {
+            String::new()
+        } else {
+            format!("(also: {})", extra.join(", "))
+        };
+        let row = format!("{:28}{:10}{:24}{}", "", source.name, source.blurb, alias_note);
+        lines.push(row.trim_end().to_string());
+    }
+    lines.join("\n")
 }
 
 /// True for `all` or any known alias. Case-insensitive.
@@ -738,8 +761,8 @@ fn find_source(ecosystem: &str) -> Option<SearchFn> {
     let wanted = ecosystem.to_lowercase();
     SOURCES
         .iter()
-        .find(|(_, aliases, _)| aliases.contains(&wanted.as_str()))
-        .map(|(_, _, f)| *f)
+        .find(|s| s.aliases.contains(&wanted.as_str()))
+        .map(|s| s.search)
 }
 
 /// Run one source; an upstream failure is a loud warning plus zero rows, never fake rows.
@@ -854,7 +877,8 @@ fn fan_out_all(query: &str, total_limit: usize) -> Vec<Candidate> {
     let per_source = total_limit.div_ceil(SOURCES.len()).max(2);
     let handles: Vec<_> = SOURCES
         .iter()
-        .map(|&(_, _, search)| {
+        .map(|source| {
+            let search = source.search;
             let q = query.to_string();
             std::thread::spawn(move || run_logged(search, &q, per_source))
         })

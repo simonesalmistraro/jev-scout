@@ -10,38 +10,57 @@ use std::process;
 use std::time::Instant;
 
 fn print_help() {
-    let help = format!(
-        r#"jev-scout {} - Zero-hallucination open-source repo and crate scout
+    println!("{}", help_text());
+}
+
+fn help_text() -> String {
+    format!(
+        r#"jev-scout {version} - Zero-hallucination package scout: GitHub, crates.io, MELPA, nixpkgs, web
+
+Searches live registries, then TypeSafe Jev scores fit, docs and maintenance.
+Every result exists; nothing is named from model memory.
 
 USAGE:
     jev-scout [OPTIONS] <QUERY>
 
 ARGS:
-    <QUERY>                 Natural language description of what you are searching for
+    <QUERY>                 What the tool should do, in plain words
 
 OPTIONS:
-    -e, --ecosystem <NAME>  Target ecosystem: 'all' (default), {}
-    -n, --limit <NUM>       Maximum results to show (default: 5)
-    -j, --json              Output machine-readable JSON to stdout
-        --no-filter         Show all candidates, skip weak-match filtering
+    -e, --ecosystem <NAME>  Where to search (default: all). One of:
+{ecosystems}
+    -n, --limit <NUM>       Results to show, 1-10 (default: 5)
+    -j, --json              Machine-readable JSON on stdout
+        --no-filter         Keep weak matches (fit < {min_fit} or confidence < {min_conf})
         --mcp               Run as a stdio Model Context Protocol (MCP) server
-    -h, --help              Print help information
-    -v, --version           Print version information
+    -h, --help              Print this help
+    -v, --version           Print version
 
 EXAMPLES:
-    jev-scout "fast sqlite tui in rust"
-    jev-scout "headless browser without chromium" --ecosystem rust
-    jev-scout "token efficient grep for coding agents" --json
-    jev-scout "git porcelain" --ecosystem emacs
-    jev-scout "sqlite tui" --ecosystem nix      # JEV_NIX_CHANNEL=26.05 to pin a release
+    jev-scout "fast sqlite tui"
+    jev-scout "vertical completion minibuffer" -e emacs
+    jev-scout "wayland screenshot tool" -e nix
+    jev-scout "async http client" -e crates -n 10
+    jev-scout "ripgrep" -e nix --json | jq -r '.[0].candidate.install_cmd'
+
+ENVIRONMENT:
+    TYPESAFE_API_KEY, OPENROUTER_API_KEY
+                            Jev API key; else read from ~/.config/openrouter/key
+    JEV_API_URL, JEV_MODEL  Override the Jev endpoint and model
+                            (default: OpenRouter decisions API, ~typesafe/jev-latest)
+    GITHUB_TOKEN, GH_TOKEN  GitHub token; else `gh auth token`. Raises the rate limit
+    JEV_NIX_CHANNEL         nixpkgs channel for -e nix (default: unstable, e.g. 26.05)
+
+FILES:
+    ~/.jev-scout/cache/         MELPA archive, refreshed every {melpa_hours}h
+    ~/.jev-scout/history.json   Previous top pick per query
 "#,
-        env!("CARGO_PKG_VERSION"),
-        search::ecosystem_names()
-            .map(|e| format!("'{}'", e))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("{}", help);
+        version = env!("CARGO_PKG_VERSION"),
+        ecosystems = search::ecosystem_help(),
+        min_fit = policy::MIN_FIT,
+        min_conf = policy::MIN_CONFIDENCE,
+        melpa_hours = policy::MELPA_DISK_TTL_SECS / 3600,
+    )
 }
 
 fn main() {
@@ -138,7 +157,7 @@ fn main() {
     let start_time = Instant::now();
 
     if !json_mode {
-        println!("🔍 Scouting repositories for: \"{}\"", query_str);
+        println!("🔍 Scouting packages for: \"{}\"", query_str);
     }
 
     let search_start = Instant::now();
@@ -269,5 +288,30 @@ fn popularity_label(c: &types::Candidate) -> String {
         },
         "web" => "web".to_string(),
         _ => format!("⭐ {}", format_num(c.stars)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_lists_every_ecosystem_and_env_var() {
+        let help = help_text();
+        for name in search::ecosystem_names() {
+            assert!(help.contains(name), "help missing ecosystem {}", name);
+        }
+        for var in [
+            "TYPESAFE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "JEV_API_URL",
+            "JEV_MODEL",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "JEV_NIX_CHANNEL",
+        ] {
+            assert!(help.contains(var), "help missing env var {}", var);
+        }
+        assert!(help.contains("1-10"));
     }
 }

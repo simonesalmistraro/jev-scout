@@ -73,7 +73,7 @@ pub fn run_mcp_server(api_key: &str) -> io::Result<()> {
                         "tools": [
                             {
                                 "name": "scout_repos",
-                                "title": "Scout open-source repos and crates",
+                                "title": "Scout real packages (GitHub, crates.io, MELPA, nixpkgs, web)",
                                 "description": "Search and score open-source repositories and crates matching natural-language prompts using TypeSafe Jev System One model. Zero hallucinations, grounded in real GitHub, crates.io, MELPA (Emacs) and nixpkgs metadata. Returns ranked candidates with fit score, confidence, maintenance probability, stars/downloads, and install commands.",
                                 "inputSchema": {
                                     "type": "object",
