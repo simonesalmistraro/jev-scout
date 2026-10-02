@@ -68,6 +68,16 @@ fn encode_query(query: &str) -> String {
     out
 }
 
+/// Install line for a GitHub hit. Emacs Lisp repos install straight into Emacs via
+/// the built-in VC installer (Emacs 29+); everything else gets cloned.
+fn github_install_cmd(full_name: &str, html_url: &str, language: &str) -> String {
+    if language == "Emacs Lisp" && !html_url.is_empty() {
+        format!("M-x package-vc-install RET {}", html_url)
+    } else {
+        format!("gh repo clone {}", full_name)
+    }
+}
+
 pub fn search_github(query: &str, limit: usize) -> Result<Vec<Candidate>, String> {
     let mut candidates = Vec::new();
     let encoded_query = encode_query(query);
@@ -132,7 +142,7 @@ pub fn search_github(query: &str, limit: usize) -> Result<Vec<Candidate>, String
                         id: full_name.clone(),
                         name,
                         description,
-                        url: html_url,
+                        url: html_url.clone(),
                         stars,
                         downloads: 0,
                         license,
@@ -141,7 +151,11 @@ pub fn search_github(query: &str, limit: usize) -> Result<Vec<Candidate>, String
                         language: item["language"].as_str().unwrap_or("").to_string(),
                         topics,
                         ecosystem: "github".to_string(),
-                        install_cmd: format!("gh repo clone {}", full_name),
+                        install_cmd: github_install_cmd(
+                            &full_name,
+                            &html_url,
+                            item["language"].as_str().unwrap_or(""),
+                        ),
                         maintainers: None,
                     });
                 }
@@ -1114,5 +1128,16 @@ mod tests {
         assert!(out[0].description.ends_with("..."));
         assert_eq!(out[0].topics.len(), policy::MAX_TOPICS);
         assert_eq!(out[1].description, "", "short text untouched");
+    }
+
+    #[test]
+    fn github_install_cmd_uses_package_vc_for_elisp() {
+        let url = "https://github.com/x/openclaw.el";
+        assert_eq!(
+            github_install_cmd("x/openclaw.el", url, "Emacs Lisp"),
+            "M-x package-vc-install RET https://github.com/x/openclaw.el"
+        );
+        assert_eq!(github_install_cmd("x/tool", "https://github.com/x/tool", "Rust"), "gh repo clone x/tool");
+        assert_eq!(github_install_cmd("x/y", "", "Emacs Lisp"), "gh repo clone x/y");
     }
 }
