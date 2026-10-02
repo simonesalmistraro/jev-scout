@@ -164,6 +164,7 @@ fn main() {
     let eval_ms = eval_start.elapsed().as_millis();
     let elapsed = start_time.elapsed();
 
+    let scored_count = evaluated.len();
     let top_results: Vec<_> = if no_filter {
         evaluated.into_iter().take(limit).collect()
     } else {
@@ -172,6 +173,14 @@ fn main() {
             .take(limit)
             .collect()
     };
+    if top_results.is_empty() && scored_count > 0 {
+        eprintln!(
+            "All {} candidates scored below fit {} or confidence {}. Rerun with --no-filter to see them.",
+            scored_count,
+            policy::MIN_FIT,
+            policy::MIN_CONFIDENCE
+        );
+    }
 
     if json_mode {
         println!("{}", serde_json::to_string_pretty(&top_results).unwrap());

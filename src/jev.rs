@@ -90,11 +90,7 @@ pub fn evaluate_candidates(
             .map(|h| h.join().unwrap_or_else(|_| Err("Jev chunk thread panicked".to_string())))
             .collect()
     });
-    let mut merged = Vec::new();
-    for result in chunk_results {
-        merged.extend(result?);
-    }
-    let evaluated = finalize_ranking(merged);
+    let evaluated = finalize_ranking(merge_chunk_results(chunk_results)?);
 
     if let Ok(mut guard) = EVAL_CACHE.lock() {
         let map = guard.get_or_insert_with(EvalCache::new);
@@ -276,6 +272,29 @@ fn evaluate_via_api(
 }
 
 /// Drop weak matches below policy floors so low-quality picks never reach the user.
+/// A failed chunk drops only its own candidates, loudly. Only when every chunk fails
+/// is the whole evaluation an error (first error reported).
+fn merge_chunk_results(
+    results: Vec<Result<Vec<EvaluatedCandidate>, String>>,
+) -> Result<Vec<EvaluatedCandidate>, String> {
+    let total = results.len();
+    let mut merged = Vec::new();
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(chunk) => merged.extend(chunk),
+            Err(e) => {
+                eprintln!("Warning: Jev chunk failed, its candidates are skipped: {}", e);
+                errors.push(e);
+            }
+        }
+    }
+    if total > 0 && errors.len() == total {
+        return Err(errors.swap_remove(0));
+    }
+    Ok(merged)
+}
+
 /// Merge per-chunk results into one list: sort globally by weighted_rank, and since
 /// every chunk asks Jev for its own best_match, keep the flag only on the
 /// highest-ranked chunk winner. Ranking across chunks is host math, not a Jev call.
@@ -444,6 +463,40 @@ mod tests {
         let best: Vec<&str> = out.iter().filter(|e| e.is_best_match).map(|e| e.candidate.id.as_str()).collect();
         assert_eq!(best, ["c"], "only the highest-ranked chunk winner keeps the flag");
         assert!(finalize_ranking(vec![mk("x", 1.0, false)]).iter().all(|e| !e.is_best_match));
+    }
+
+    #[test]
+    fn chunk_failure_is_partial_unless_total() {
+        let ok = |id: &str| -> Result<Vec<EvaluatedCandidate>, String> {
+            Ok(vec![EvaluatedCandidate {
+                candidate: crate::types::Candidate {
+                    id: id.into(),
+                    name: id.into(),
+                    description: "".into(),
+                    url: "".into(),
+                    stars: 0,
+                    downloads: 0,
+                    license: "".into(),
+                    updated_at: "".into(),
+                    pushed_at: "".into(),
+                    language: "".into(),
+                    topics: vec![],
+                    ecosystem: "".into(),
+                    install_cmd: "".into(),
+                    maintainers: None,
+                },
+                fit_score: 0.0,
+                is_modern: 0.0,
+                confidence: 0.0,
+                weighted_rank: 0.0,
+                is_best_match: false,
+            }])
+        };
+        let partial = merge_chunk_results(vec![ok("a"), Err("HTTP 400".into()), ok("b")]).unwrap();
+        assert_eq!(partial.len(), 2);
+        let total = merge_chunk_results(vec![Err("first".into()), Err("second".into())]);
+        assert_eq!(total.unwrap_err(), "first");
+        assert!(merge_chunk_results(vec![]).unwrap().is_empty());
     }
 
     #[test]

@@ -761,14 +761,14 @@ pub fn search_candidates(query: &str, ecosystem: &str, total_limit: usize) -> Ve
         return hit;
     }
 
-    let results = dedupe_candidates(match find_source(ecosystem) {
+    let results = clamp_text(dedupe_candidates(match find_source(ecosystem) {
         Some(search) => run_logged(search, query, total_limit),
         None if ecosystem.eq_ignore_ascii_case("all") => fan_out_all(query, total_limit),
         None => {
             eprintln!("Warning: unknown ecosystem '{}'", ecosystem);
             Vec::new()
         }
-    });
+    }));
 
     cache_put(&key, &results);
     results
@@ -810,6 +810,19 @@ fn absorb_duplicate(keep: &mut Candidate, other: Candidate) {
     {
         keep.license = other.license;
     }
+}
+
+/// Cap free-text fields at ingestion, so Jev payloads, terminal cards and JSON all
+/// stay bounded. Char-based, never splits a UTF-8 code point.
+fn clamp_text(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+    for c in &mut candidates {
+        if c.description.chars().count() > policy::MAX_DESCRIPTION_CHARS {
+            let cut: String = c.description.chars().take(policy::MAX_DESCRIPTION_CHARS).collect();
+            c.description = format!("{}...", cut.trim_end());
+        }
+        c.topics.truncate(policy::MAX_TOPICS);
+    }
+    candidates
 }
 
 /// One candidate per homepage across sources, first-seen order, preferred copy kept.
@@ -1064,5 +1077,18 @@ mod tests {
         assert_eq!(out[2].stars, 4, "nixpkgs distro count is never replaced by GitHub stars");
         assert_eq!(out[2].pushed_at, "2026-01-01T00:00:00Z");
         assert_eq!(out[1].license, "MIT", "web duplicate never downgrades the kept copy");
+    }
+
+    #[test]
+    fn clamps_stuffed_descriptions_and_topics() {
+        let mut stuffed = cand("spam", "github", "https://github.com/x/spam", 0, "", "MIT");
+        stuffed.description = "é".repeat(64_765);
+        stuffed.topics = (0..20).map(|i| format!("t{}", i)).collect();
+        let normal = cand("ok", "github", "https://github.com/x/ok", 0, "", "MIT");
+        let out = clamp_text(vec![stuffed, normal]);
+        assert_eq!(out[0].description.chars().count(), policy::MAX_DESCRIPTION_CHARS + 3);
+        assert!(out[0].description.ends_with("..."));
+        assert_eq!(out[0].topics.len(), policy::MAX_TOPICS);
+        assert_eq!(out[1].description, "", "short text untouched");
     }
 }
