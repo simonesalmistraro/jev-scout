@@ -79,16 +79,22 @@ pub fn evaluate_candidates(
         }
     }
 
-    let evaluated = if candidates.len() <= 3 {
-        evaluate_via_api(query, &candidates, api_key)?
-    } else {
-        // Jev drops questions past ~15 per call: chunk, fan out per chunk, merge.
-        let mut all = Vec::new();
-        for chunk in candidates.chunks(3) {
-            all.extend(evaluate_via_api(query, chunk, api_key)?);
-        }
-        all
-    };
+    // Jev drops questions past ~15 per call: chunk by 3, one thread per chunk, merge.
+    let chunk_results: Vec<Result<Vec<EvaluatedCandidate>, String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = candidates
+            .chunks(3)
+            .map(|chunk| s.spawn(move || evaluate_via_api(query, chunk, api_key)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("Jev chunk thread panicked".to_string())))
+            .collect()
+    });
+    let mut merged = Vec::new();
+    for result in chunk_results {
+        merged.extend(result?);
+    }
+    let evaluated = finalize_ranking(merged);
 
     if let Ok(mut guard) = EVAL_CACHE.lock() {
         let map = guard.get_or_insert_with(EvalCache::new);
@@ -270,6 +276,23 @@ fn evaluate_via_api(
 }
 
 /// Drop weak matches below policy floors so low-quality picks never reach the user.
+/// Merge per-chunk results into one list: sort globally by weighted_rank, and since
+/// every chunk asks Jev for its own best_match, keep the flag only on the
+/// highest-ranked chunk winner. Ranking across chunks is host math, not a Jev call.
+fn finalize_ranking(mut evaluated: Vec<EvaluatedCandidate>) -> Vec<EvaluatedCandidate> {
+    evaluated.sort_by(|a, b| {
+        b.weighted_rank
+            .partial_cmp(&a.weighted_rank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut flagged = false;
+    for e in evaluated.iter_mut().filter(|e| e.is_best_match) {
+        e.is_best_match = !flagged;
+        flagged = true;
+    }
+    evaluated
+}
+
 /// What Jev sees per candidate. Derivable fields (install_cmd, url) are trimmed;
 /// registry-specific facts are added only when the registry supplies them.
 fn candidate_state(c: &crate::types::Candidate) -> serde_json::Value {
@@ -386,6 +409,41 @@ mod tests {
         assert_eq!(state["maintainers"], 0);
         assert!(state["stars_meaning"].is_string());
         assert!(candidate_state(&mk("", None)).get("maintainers").is_none());
+    }
+
+    #[test]
+    fn finalize_sorts_globally_and_keeps_one_best() {
+        let mk = |id: &str, rank: f64, best: bool| EvaluatedCandidate {
+            candidate: crate::types::Candidate {
+                id: id.into(),
+                name: id.into(),
+                description: "".into(),
+                url: "".into(),
+                stars: 0,
+                downloads: 0,
+                license: "".into(),
+                updated_at: "".into(),
+                pushed_at: "".into(),
+                language: "".into(),
+                topics: vec![],
+                ecosystem: "".into(),
+                install_cmd: "".into(),
+                maintainers: None,
+            },
+            fit_score: 0.0,
+            is_modern: 0.0,
+            confidence: 0.0,
+            weighted_rank: rank,
+            is_best_match: best,
+        };
+        // Two chunks, each sorted internally, each with its own Jev best_match.
+        let merged = vec![mk("a", 0.9, true), mk("b", 0.5, false), mk("c", 1.2, true), mk("d", 0.1, false)];
+        let out = finalize_ranking(merged);
+        let ids: Vec<&str> = out.iter().map(|e| e.candidate.id.as_str()).collect();
+        assert_eq!(ids, ["c", "a", "b", "d"]);
+        let best: Vec<&str> = out.iter().filter(|e| e.is_best_match).map(|e| e.candidate.id.as_str()).collect();
+        assert_eq!(best, ["c"], "only the highest-ranked chunk winner keeps the flag");
+        assert!(finalize_ranking(vec![mk("x", 1.0, false)]).iter().all(|e| !e.is_best_match));
     }
 
     #[test]
